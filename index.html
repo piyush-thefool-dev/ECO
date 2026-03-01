@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+  <title>ECO — Private File Sharing</title>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,600;0,9..144,700;1,9..144,300&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════
+     ANIMATED MESH BACKGROUND
+══════════════════════════════════════════ -->
+<div class="mesh-bg" aria-hidden="true">
+  <div class="mesh-blob blob-a"></div>
+  <div class="mesh-blob blob-b"></div>
+  <div class="mesh-blob blob-c"></div>
+  <div class="mesh-blob blob-d"></div>
+</div>
+
+<!-- Confetti canvas -->
+<canvas id="fx"></canvas>
+
+<div class="app">
+
+  <!-- ══ HEADER ══ -->
+  <header class="header">
+    <div class="logo">
+      <div class="logo-mark" aria-hidden="true">🔗</div>
+      <div class="logo-text">
+        <div class="logo-name">ECO</div>
+        <div class="logo-sub">Private file sharing</div>
+      </div>
+    </div>
+    <div class="conn-badge" id="connBadge" onclick="jumpToConnect()" role="button" tabindex="0">
+      <span class="conn-dot" id="connDot"></span>
+      <span id="connText">Not connected</span>
+    </div>
+  </header>
+
+  <!-- ══ STEP INDICATOR ══ -->
+  <div class="stepper" id="stepper" role="list">
+    <div class="step-item active" id="s1" role="listitem">
+      <div class="step-circle"><span class="step-num">1</span></div>
+      <div class="step-label">File</div>
+    </div>
+    <div class="step-connector" id="sc1"></div>
+    <div class="step-item" id="s2" role="listitem">
+      <div class="step-circle"><span class="step-num">2</span></div>
+      <div class="step-label">Connect</div>
+    </div>
+    <div class="step-connector" id="sc2"></div>
+    <div class="step-item" id="s3" role="listitem">
+      <div class="step-circle"><span class="step-num">3</span></div>
+      <div class="step-label">Send</div>
+    </div>
+  </div>
+
+  <!-- ══ STEP 1 — DROP ZONE ══ -->
+  <section class="section" id="sec-drop">
+    <div class="drop-zone" id="dropzone"
+         ondragover="onDragOver(event)"
+         ondragleave="onDragLeave(event)"
+         ondrop="onDrop(event)"
+         onclick="onDropzoneClick(event)"
+         role="button" tabindex="0"
+         aria-label="Drop file here or click to browse">
+
+      <!-- Empty state -->
+      <div id="empty-state">
+        <div class="drop-hero" id="drop-hero"><span id="drop-emoji">📂</span></div>
+        <h2 class="drop-title">Drop a file here</h2>
+        <p class="drop-sub">Documents, photos, code — anything. ECO shrinks it and delivers it straight to your friend, privately.</p>
+        <button class="btn btn-primary" onclick="document.getElementById('file-input').click(); event.stopPropagation()">
+          Choose a file
+        </button>
+        <p style="font-size:12px; color:var(--ink-dim); margin-top:13px">Any file type · Up to 500 MB</p>
+      </div>
+
+      <!-- File loaded state -->
+      <div class="file-row" id="file-row">
+        <div class="file-thumb" id="file-thumb"><span id="file-emoji">📄</span></div>
+        <div style="flex:1; min-width:0">
+          <div class="file-name" id="file-name">—</div>
+          <div class="file-meta" id="file-meta">—</div>
+          <div class="chips" id="file-chips"></div>
+        </div>
+        <button class="btn btn-glass btn-sm" onclick="clearFile(); event.stopPropagation()" aria-label="Remove file">✕</button>
+      </div>
+    </div>
+
+    <!-- First-run coach mark -->
+    <div class="coach" id="coach1">
+      <button class="coach-x" onclick="this.parentElement.classList.remove('on')" aria-label="Dismiss">✕</button>
+      <strong>Nice!</strong> Your file is ready. Now scroll down to connect with your friend.
+    </div>
+  </section>
+
+  <!-- ══ STEP 1b — COMPRESSION SNAPSHOT ══ -->
+  <section class="section reveal" id="sec-compression" style="display:none">
+    <div class="section-label">File snapshot</div>
+    <div class="compression-banner">
+      <div>
+        <div class="c-pct" id="c-pct">—<sup>%</sup></div>
+        <div style="font-size:12px; opacity:0.72; margin-top:2px">smaller before it travels</div>
+      </div>
+      <div style="flex:1; padding-left:17px; border-left:1px solid rgba(255,255,255,0.18)">
+        <div class="c-detail" id="c-detail">—</div>
+      </div>
+    </div>
+    <div class="stat-grid">
+      <div class="stat-box">
+        <div class="stat-val" id="s-orig">—</div>
+        <div class="stat-lbl">Original size</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-val" style="color:var(--teal-deep)" id="s-comp">—</div>
+        <div class="stat-lbl">After shrinking</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-val" id="s-time">—</div>
+        <div class="stat-lbl">Est. send time</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-val" style="color:var(--green)" id="s-saved">—</div>
+        <div class="stat-lbl">Data saved</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ STEP 2 — CONNECT (hidden until file dropped) ══ -->
+  <section class="section reveal" id="sec-connect" style="display:none">
+    <div class="section-label">Connect with a friend</div>
+    <div class="card">
+      <div class="card-body">
+
+        <!-- Your share code -->
+        <div class="code-label">
+          Your share code
+          <div class="tip-wrap">
+            <span class="tip-q">?</span>
+            <div class="tip-box">Share this code with the person you want to send to. They'll enter it on their ECO screen.</div>
+          </div>
+        </div>
+        <div class="code-display" id="code-display">
+          <div class="code-val" id="my-code">—</div>
+          <button class="copy-btn" id="copy-btn" onclick="copyCode()">Copy</button>
+        </div>
+
