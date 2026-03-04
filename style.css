@@ -96,3 +96,53 @@ body {
 
 button { font-family: inherit; cursor: pointer; border: none; background: none; }
 input  { font-family: inherit; }
+
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   ANIMATED MESH BACKGROUND
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+.mesh-bg {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.mesh-blob {
+  position: absolute;
+  border-radius: 50%;
+  will-change: transform;
+  filter: blur(90px);
+}
+
+.blob-a {
+  width: 700px; height: 700px;
+  background: conic-gradient(from 0deg, #2DD4BF18, #0F938514, #2DD4BF18);
+  top: -180px; left: -220px;
+  animation: drift-a 26s ease-in-out infinite alternate;
+}
+.blob-b {
+  width: 500px; height: 500px;
+  background: radial-gradient(circle, #F2EFE960 0%, transparent 70%);
+  top: 35%; right: -160px;
+  animation: drift-b 32s ease-in-out infinite alternate;
+}
+.blob-c {
+  width: 420px; height: 420px;
+  background: radial-gradient(circle, #0F938518 0%, transparent 70%);
+  bottom: -80px; left: 10%;
+  animation: drift-c 20s ease-in-out infinite alternate;
+}
+.blob-d {
+  width: 300px; height: 300px;
+  background: radial-gradient(circle, #2DD4BF10 0%, transparent 70%);
+  top: 55%; left: 30%;
+  animation: drift-d 24s ease-in-out infinite alternate;
+}
+
+@media (prefers-color-scheme: dark) {
+  .blob-a { background: conic-gradient(from 0deg, #2DD4BF0C, #0F93850A, #2DD4BF0C); }
+  .blob-b { background: radial-gradient(circle, #1A242018 0%, transparent 70%); }
+  .blob-c { background: radial-gradient(circle, #0F93850E 0%, transparent 70%); }
+}
