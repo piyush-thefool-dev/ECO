@@ -1,4 +1,26 @@
-# Logs
+# ── Python ──────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.dist/
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+.Python
+env/
+venv/
+.venv/
+ENV/
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Logs ─────────────────────────────────────────────
 logs
 *.log
 npm-debug.log*
