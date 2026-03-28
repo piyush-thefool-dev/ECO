@@ -14,9 +14,14 @@
       rel="stylesheet"
     />
     <style>
-      /* Ensure font-display:swap behaviour even for Google Fonts */
-      @font-face { font-display: swap; }
-    </style>
+  /* Ensure font-display:swap behaviour even for Google Fonts */
+  @font-face {
+    font-family: 'YourFontName';
+    src: url('path/to/your-font.woff2') format('woff2'),
+         url('path/to/your-font.woff') format('woff');
+    font-display: swap;
+  }
+</style>
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
