@@ -1,78 +1,73 @@
 const socket = io();
 
-/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   STATE MANAGEMENT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
-// ── Connection state ──
-let pc = null; // RTCPeerConnection object
-window.myRoom = null; // Shared with script.js via window scope // Current room code shared between 2 peers
-let dataChannel = null; // DataChannel pipe for file transfer
+// STATE MANAGEMENT
+let pc = null; // RTCPeerConnection instance representing the P2P tunnel
+window.myRoom = null;
+let dataChannel = null; // SCTP protocol channel for transferring raw byte arrays
 
-// ── Receive state (Hybrid Direct-to-Disk + RAM Fallback) ──
-let isReceiving = false; // Flag to track if file is being received
-let incomingMeta = null; // Metadata of incoming file (name, size, type)
-let fileStream = null; // File stream for direct-to-disk saving (Chrome/Edge)
-let writeQueue = Promise.resolve(); // Queue to handle sequential disk writes
-let receiveBuffer = []; // RAM buffer for fallback browsers (Firefox/Brave)
-let receivedSize = 0; // Tracks how many bytes received so far
-let transferCount = 0; // Counts total transfers in session
+// MEMORY AND FILE STATE
+let isReceiving = false;
+let incomingMeta = null;
+let fileStream = null; // Pointer for the File System Access API (Direct-to-Disk streaming)
+let writeQueue = Promise.resolve();
+let receiveBuffer = []; // Fallback memory array for browsers without Direct-to-Disk access
+let receivedSize = 0;
+let transferCount = 0;
 
-// ── Send state ──
-let activeSendFile = null; // File currently being sent
-const CHUNK_SIZE = 16384; // 16KB per chunk - optimal size for WebRTC DataChannel
+let activeSendFile = null;
+let pendingHuffmanMeta = null;
 
-console.log("Connecting to signaling server...");
+// RECEIVER TELEMETRY
+let rxLastReportTime = 0;
+let rxBytesSinceLastReport = 0;
+let rxPeakSpeed = 0;
 
-/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   SIGNALING SERVER (SOCKET.IO)
-   Handles finding peers and exchanging connection info
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+// TUNING CONSTANTS
+// Chunk limits safely bypass the SCTP protocol's 64KB message size limitations
+const RAW_CHUNK_SIZE = 65536;
+const COMP_CHUNK_SIZE = 16384;
 
-// Fires when socket connects to server.js
+// SIGNALING (Matchmaker Communication)
 socket.on("connect", () => {
   console.log("✅ Connected! My ID:", socket.id);
   $("connDot").className = "conn-dot searching";
   $("connText").textContent = "Waiting for peer…";
 });
 
-// Starter/Trigger - fires when both peers are in the same room
-// This peer becomes the initiator and creates the WebRTC offer
+// Peer 2 generates the initial WebRTC Offer
 socket.on("ready", async () => {
-  console.log("🔔 I am the initiator — creating offer...");
+  console.log("🔔 Room ready. I am the initiator — creating offer...");
   pc = createPC();
-  dataChannel = pc.createDataChannel("eco-transfer"); // create pipe BEFORE offer
+  dataChannel = pc.createDataChannel("eco-transfer");
   setupDataChannel(dataChannel);
   const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer); // save offer on this side
-  socket.emit("offer", { code: myRoom, data: offer }); // send to server to relay
+  await pc.setLocalDescription(offer);
+  socket.emit("offer", { code: window.myRoom, data: offer });
 });
 
-// Peer B receives offer from Peer A via server relay
+// Peer 1 receives the Offer and replies with an Answer
 socket.on("offer", async (offer) => {
-  if (pc) return; // ignore if already connected
+  console.log("🔔 Received offer. Creating answer...");
+  if (pc) return;
   pc = createPC();
-  // BUG FIX: Do NOT overwrite myRoom with our own display code.
-  // myRoom was already set correctly when we joined the room.
   pc.ondatachannel = (e) => {
-    // Peer B receives the DataChannel Peer A created
     dataChannel = e.channel;
     setupDataChannel(dataChannel);
   };
   await pc.setRemoteDescription(new RTCSessionDescription(offer));
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
-  socket.emit("answer", { code: myRoom, data: answer });
+  socket.emit("answer", { code: window.myRoom, data: answer });
 });
 
-// Peer A receives Peer B's answer via server relay
 socket.on("answer", async (answer) => {
+  console.log("🔔 Received answer. Establishing connection...");
   if (pc && pc.signalingState === "have-local-offer") {
     await pc.setRemoteDescription(new RTCSessionDescription(answer));
   }
 });
 
-// Both peers receive ICE candidates from each other via server relay
-// Adds each candidate to find the best direct path between peers
+// ICE Resolution: Exchanging routing paths to bypass home NATs and Firewalls
 socket.on("ice-candidate", async (candidate) => {
   if (pc) {
     try {
@@ -83,91 +78,82 @@ socket.on("ice-candidate", async (candidate) => {
   }
 });
 
-// Bouncer - fires when room already has 2 peers
-socket.on("room-full", () => {
-  onRoomFull();
-});
+socket.on("room-full", () => onRoomFull());
 
-// Fires when Peer B joins the room
 socket.on("peer-joined", () => {
   $("bridge-caption").textContent = "Friend found! Connecting…";
 });
 
-// Cleanup - fires when other peer disconnects or closes tab
 socket.on("peer-left", () => {
-  S.connected = false;
-  $("connDot").className = "conn-dot";
-  $("connText").textContent = "Not connected";
-  $("peer-input").disabled = false;
   toast("⚠️", "Peer left", "The other person disconnected.");
+  // Sever connection fully if the other peer leaves
+  setTimeout(() => window.location.reload(), 1500);
 });
 
-/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   WEBRTC PEER CONNECTION
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
-
-// Creates and configures a new RTCPeerConnection
+// CONNECTION FACTORY
 function createPC() {
   const peer = new RTCPeerConnection({
-    iceServers: [
-      { urls: "stun:stun.l.google.com:19302" }, // Primary STUN server
-      { urls: "stun:stun1.l.google.com:19302" }, // Backup STUN server
-    ],
+    // STUN: A lightweight server that reflects the user's public IP back to them
+    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
   });
-
-  // ICE Candidate Handler - sends each candidate to other peer via server
   peer.onicecandidate = ({ candidate }) => {
     if (candidate)
-      socket.emit("ice-candidate", { code: myRoom, data: candidate });
+      socket.emit("ice-candidate", { code: window.myRoom, data: candidate });
   };
-
-  // Connection State Monitor - updates UI based on connection status
   peer.onconnectionstatechange = () => {
-    console.log("Connection state:", peer.connectionState);
-
-    // P2P connection fully established
-    if (peer.connectionState === "connected") {
-      S.connected = true;
-      $("connDot").className = "conn-dot live";
-      $("connText").textContent = "Connected";
-      activateBridge();
-      onPeerConnected();
-      $("peer-input").value = "";
-      $("peer-input").disabled = true;
-      toast("🔗", "Connected!", "Direct encrypted link established.");
-      if (S.files.length > 0) updateSendSection();
-    }
-
-    // Connection lost
+    console.log("PeerConnection state:", peer.connectionState);
     if (
       peer.connectionState === "disconnected" ||
       peer.connectionState === "failed"
     ) {
-      S.connected = false;
-      $("connDot").className = "conn-dot";
-      $("connText").textContent = "Not connected";
-      $("peer-input").disabled = false;
-      toast("⚠️", "Disconnected", "Peer left.");
+      toast("⚠️", "Disconnected", "Connection lost.");
+      setTimeout(() => window.location.reload(), 1500);
     }
   };
-
   return peer;
 }
 
-/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   DATA CHANNEL SETUP & ROUTING
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
-
-// Sets up the DataChannel for binary file transfer
 function setupDataChannel(channel) {
+  // Enforces ArrayBuffer mode to bypass slow string serialization
   channel.binaryType = "arraybuffer";
-  channel.onmessage = handleMessage; // All incoming traffic goes to the router
+  channel.onmessage = handleMessage;
+  channel.onopen = () => {
+    console.log("🚀 DataChannel is OPEN!");
+    S.connected = true;
+    $("connDot").className = "conn-dot live";
+    $("connText").textContent = "Connected";
+    activateBridge();
+    onPeerConnected();
+    $("peer-input").value = "";
+    $("peer-input").disabled = true;
+    toast("🔗", "Connected!", "Direct encrypted link established.");
+    if (S.files.length > 0) updateSendSection();
+  };
+  channel.onclose = () => {
+    console.log("DataChannel closed.");
+    setTimeout(() => window.location.reload(), 1000);
+  };
 }
 
-// Main message handler for DataChannel (The Router)
+// TWO-SIDED ABORT: Expose abort function to UI so it can notify the peer over the network
+window.notifyAbort = function () {
+  if (dataChannel && dataChannel.readyState === "open") {
+    dataChannel.send(JSON.stringify({ type: "abort" }));
+  }
+  activeSendFile = null;
+  isReceiving = false;
+  receiveBuffer = [];
+
+  // If streaming to disk, safely abort and discard the incomplete file
+  if (fileStream) {
+    fileStream.abort().catch(() => {});
+    fileStream = null;
+  }
+};
+
+// THE INBOX (DATA ROUTER)
 async function handleMessage(e) {
-  // ── 1. ROUTER: JSON CONTROL SIGNALS & COMPRESSED CHUNKS ──
-  // If the message is a string, it's either metadata or a compressed payload
+  // DATA LANE 1: JSON STRINGS (For File Metadata and System Commands)
   if (typeof e.data === "string") {
     let msg;
     try {
@@ -176,13 +162,19 @@ async function handleMessage(e) {
       return;
     }
 
-    // START SIGNAL - Receiver gets file metadata before chunks arrive
     if (msg.type === "start") {
       isReceiving = true;
       incomingMeta = msg.meta;
       receivedSize = 0;
       receiveBuffer = [];
       transferCount++;
+
+      // Initialize Receiver Speedometer Metrics
+      rxLastReportTime = performance.now();
+      rxBytesSinceLastReport = 0;
+      rxPeakSpeed = 0;
+      $("peak-spd").textContent = "0";
+
       console.log(
         "📥 Incoming file:",
         incomingMeta.name,
@@ -190,8 +182,8 @@ async function handleMessage(e) {
       );
       showReceiveUI(incomingMeta);
 
+      // DIRECT-TO-DISK: Prompts the user for a save location to stream data directly to their SSD
       if ("showSaveFilePicker" in window) {
-        // Modern Browser (Chrome/Edge): Ask for save location before receiving
         $("prog-sub").textContent = "Waiting for you to accept...";
         document.querySelector(".prog-track").style.display = "none";
         document.querySelector(".speedo").style.display = "none";
@@ -208,75 +200,120 @@ async function handleMessage(e) {
               suggestedName: incomingMeta.name,
             });
             fileStream = await handle.createWritable();
-
             acceptBtn.remove();
             document.querySelector(".prog-track").style.display = "block";
             document.querySelector(".speedo").style.display = "flex";
             $("prog-sub").textContent = "Receiving…";
-
-            // Tell sender we are ready to receive chunks
             dataChannel.send(JSON.stringify({ type: "ready" }));
           } catch (err) {
             console.warn("User cancelled save:", err);
             isReceiving = false;
             dataChannel.send(JSON.stringify({ type: "abort" }));
-            doReset();
+            if (typeof window.onRemoteAbort === "function")
+              window.onRemoteAbort();
           }
         };
         $("send-active").insertBefore(acceptBtn, $("prog-sub").nextSibling);
       } else {
-        // Legacy/Privacy Browser Fallback
         console.log("⚠️ Privacy Browser detected. Falling back to RAM buffer.");
         $("prog-sub").textContent = "Receiving…";
         dataChannel.send(JSON.stringify({ type: "ready" }));
       }
     }
 
-    // Sender starts streaming chunks when receiver confirms ready
     if (msg.type === "ready") startSendingChunks();
 
-    // Receiver cancelled - abort the transfer
+    // Remote Peer Abort Listener
     if (msg.type === "abort") {
-      toast("⚠️", "Cancelled", "Receiver cancelled the transfer.");
-      doAbort();
-    }
-
-    // DECOMPRESS INCOMING BYTES (HUFFMAN + RLE)
-    if (msg.type === "huffman-chunk") {
-      // 1. Unpack the bits back into bytes (Huffman)
-      const huffmanBytes = HuffmanCoder.decode(
-        msg.payload,
-        msg.bitLength,
-        msg.tree,
-      );
-      // 2. Expand the [Count, Value] runs back into original data (RLE)
-      const decodedBytes = RLEncoder.decode(huffmanBytes);
-      // Pass the decompressed bytes into the unified save logic
-      saveReceivedData(decodedBytes);
+      activeSendFile = null;
+      isReceiving = false;
+      receiveBuffer = [];
+      if (fileStream) {
+        fileStream.abort().catch(() => {});
+        fileStream = null;
+      }
+      if (typeof window.onRemoteAbort === "function") window.onRemoteAbort();
       return;
     }
 
+    // Telemetry Sync: Triggers when the sender successfully finishes the entire file queue
+    if (msg.type === "batch-done") {
+      if (typeof window.showSuccessScreen === "function") {
+        window.showSuccessScreen(msg.orig, msg.comp, msg.count, "receiver");
+      }
+      return;
+    }
+
+    // Tracks the compression dictionary required to decode the incoming binary payload
+    if (msg.type === "huffman-meta") pendingHuffmanMeta = msg;
     return;
   }
 
-  // ── 2. ROUTER: RAW BINARY CHUNKS (Bypassed) ──
-  // If the Smart Filter skipped compression, it arrives here as an ArrayBuffer
+  // DATA LANE 2: RAW BINARY PAYLOADS (Uint8Array)
   if (!isReceiving || !incomingMeta) return;
-  saveReceivedData(new Uint8Array(e.data));
+
+  if (pendingHuffmanMeta) {
+    // Reconstruct the compressed payload using the previously received dictionary
+    const huffmanBytes = HuffmanCoder.decode(
+      e.data,
+      pendingHuffmanMeta.bitLength,
+      pendingHuffmanMeta.tree,
+    );
+    const decodedBytes = RLEncoder.decode(huffmanBytes);
+    saveReceivedData(decodedBytes);
+    pendingHuffmanMeta = null;
+  } else {
+    // Process uncompressed payload natively
+    saveReceivedData(new Uint8Array(e.data));
+  }
 }
 
-// ── UNIFIED SAVE LOGIC ──
-// Extracted so both compressed and raw routers save files the exact same way
+// DISK WRITING LOGIC
 function saveReceivedData(bytes) {
-  // Edge Case: 0-byte file completion
   if (incomingMeta.size === 0) {
     isReceiving = false;
-    onTransferComplete("receiver");
+    updateReceiveProgress(100, 0, 0);
+    $("prog-sub").textContent = "Done! Waiting for next file…";
+    setTimeout(() => onTransferComplete("receiver"), 400);
     return;
+  }
+
+  // INDEPENDENT RECEIVER SPEEDOMETER MATH
+  rxBytesSinceLastReport += bytes.byteLength;
+  const now = performance.now();
+  const timeDiff = now - rxLastReportTime;
+
+  if (timeDiff > 250 || receivedSize + bytes.byteLength >= incomingMeta.size) {
+    const safeTimeDiff = timeDiff > 0 ? timeDiff : 1;
+    const speedBps = rxBytesSinceLastReport / (safeTimeDiff / 1000);
+    const speedMbps = (speedBps / (1024 * 1024)).toFixed(1);
+
+    if (
+      receivedSize + bytes.byteLength >= incomingMeta.size &&
+      timeDiff < 50 &&
+      speedMbps > 100
+    ) {
+      $("speedo-val").textContent = "Fast ⚡";
+    } else {
+      $("speedo-val").textContent = speedMbps + " MB/s";
+    }
+
+    if (speedMbps > rxPeakSpeed && speedMbps < 10000) {
+      rxPeakSpeed = speedMbps;
+      $("peak-spd").textContent = rxPeakSpeed;
+    }
+
+    const remainingBytes = incomingMeta.size - receivedSize;
+    const secsRemaining = speedBps > 0 ? remainingBytes / speedBps : 0;
+    $("s-time").textContent =
+      secsRemaining < 3 ? "< 3 sec" : "~" + Math.ceil(secsRemaining) + "s";
+
+    rxLastReportTime = now;
+    rxBytesSinceLastReport = 0;
   }
 
   if (fileStream) {
-    // MODE 1: Direct-to-Disk (Chrome/Edge)
+    // Promises are queued sequentially to prevent out-of-order disk writes
     writeQueue = writeQueue.then(async () => {
       await fileStream.write(bytes);
       receivedSize += bytes.byteLength;
@@ -289,11 +326,12 @@ function saveReceivedData(bytes) {
         isReceiving = false;
         await fileStream.close();
         fileStream = null;
-        onTransferComplete("receiver"); // Triggers next file in batch
+        $("prog-sub").textContent = "Done! Waiting for next file…";
+        onTransferComplete("receiver");
       }
     });
   } else {
-    // MODE 2: RAM Fallback (Firefox/Brave)
+    // Legacy Array buffering
     receiveBuffer.push(bytes);
     receivedSize += bytes.byteLength;
     updateReceiveProgress(
@@ -315,165 +353,180 @@ function saveReceivedData(bytes) {
       a.click();
       URL.revokeObjectURL(url);
       incomingMeta = savedMeta;
-      onTransferComplete("receiver"); // Triggers next file in batch
+      updateReceiveProgress(100, savedMeta.size, savedMeta.size);
+      $("prog-sub").textContent = "Done! Waiting for next file…";
+      setTimeout(() => onTransferComplete("receiver"), 400);
     }
   }
 }
 
-/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   FILE SENDING LOGIC
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
-
-// Initiates file transfer by sending metadata first
 function sendFileOverChannel(file) {
   if (!pc || pc.connectionState !== "connected") return false;
   if (!dataChannel || dataChannel.readyState !== "open") return false;
 
   activeSendFile = file;
   console.log("📤 Sending START signal for:", file.name);
-
   const startMsg = {
     type: "start",
     meta: { name: file.name, size: file.size, type: file.type },
   };
   dataChannel.send(JSON.stringify(startMsg));
-
   $("prog-sub").textContent = "Waiting for friend to choose save location…";
   return true;
 }
 
-// ── COMPRESS REAL BYTES, SMART FILTER & TRACK LIVE SPEED ──
-// Streams file in 16KB chunks through DataChannel
-function startSendingChunks() {
+// THE OUTBOX (HIGH-THROUGHPUT STREAMING)
+async function startSendingChunks() {
   if (!activeSendFile) return;
   console.log("📤 Receiver ready. Streaming chunks...");
 
   const file = activeSendFile;
-  const reader = new FileReader();
   let offset = 0;
   let totalCompressedBytesSent = 0;
-
-  // Variables for Live Speedometer
   let startTime = performance.now();
   let lastReportTime = startTime;
   let bytesSinceLastReport = 0;
   let peakSpeed = 0;
 
-  // ✨ SMART FILTER ✨
-  // Check if file is uncompressible (video, image, zip, pdf, audio)
-  // Bypassing these saves massive amounts of CPU power
+  // SMART FILTER: Bypass the compression algorithms if the file is already a dense binary format
   const skipCompression =
     file.type.startsWith("video/") ||
     file.type.startsWith("image/") ||
     file.type.startsWith("audio/") ||
     file.type.includes("zip") ||
-    file.type.includes("pdf");
+    file.type.includes("pdf") ||
+    file.type.includes("word") ||
+    file.type.includes("excel") ||
+    file.type.includes("powerpoint") ||
+    file.type.includes("octet-stream") ||
+    file.type.includes("wasm") ||
+    file.type === "";
+
+  const netChunkSize = skipCompression ? RAW_CHUNK_SIZE : COMP_CHUNK_SIZE;
+
+  // OPTIMIZATION 1: Read-Ahead Buffer. Loads 4MB blocks from disk to minimize physical I/O bottlenecks.
+  const DISK_READ_SIZE = 4 * 1024 * 1024;
+  // OPTIMIZATION 2: Backpressure Limits. Forces the thread to pause if the network buffer exceeds 4MB.
+  const BUFFER_MAX = 4 * 1024 * 1024;
+  dataChannel.bufferedAmountLowThreshold = 2 * 1024 * 1024;
 
   if (skipCompression) {
     $("prog-sub").textContent = "Bypassing compression (raw transfer)…";
-    console.log(`⚡ Smart Filter: Bypassing compression for ${file.type}`);
+    console.log(
+      `⚡ Smart Filter: Raw transfer @ ${netChunkSize / 1024}KB chunks`,
+    );
   } else {
     $("prog-sub").textContent = "Compressing and sending…";
     console.log(
-      `🗜️ Smart Filter: Compressing ${file.type || "unknown format"}...`,
+      `🗜️ Smart Filter: Compressing @ ${netChunkSize / 1024}KB chunks`,
     );
   }
 
-  // ✨ EMPTY FILE FIX ✨
-  // If the file is 0 bytes, handle it instantly without dividing by zero
   if (file.size === 0) {
-    console.log("⚠️ File is empty (0 bytes). Sending empty payload.");
-    // We send an empty ArrayBuffer so receiver gets something to trigger completion
     dataChannel.send(new ArrayBuffer(0));
     $("prog-bar").style.width = "100%";
     $("prog-pct").textContent = "100%";
     $("speedo-val").textContent = "Instant ⚡";
-    $("s-comp").textContent = "0 B";
-    $("s-saved").textContent = "0 B";
     $("s-time").textContent = "< 1 sec";
-
-    // Pass '0' and '0' so the UI math doesn't break
     setTimeout(() => onTransferComplete("sender", 0, 0), 300);
     return;
   }
 
-  const sendNextChunk = () => {
-    // All chunks sent - transfer complete
+  const sendNextDiskBlock = async () => {
+    // Interruption check: Cancel the loop if the user clicked Stop Sending
+    if (!activeSendFile) {
+      dataChannel.onbufferedamountlow = null;
+      return;
+    }
+
     if (offset >= file.size) {
       activeSendFile = null;
+      dataChannel.onbufferedamountlow = null;
       return;
     }
-    // Buffer check - slow down if DataChannel is overwhelmed
-    if (dataChannel.bufferedAmount > CHUNK_SIZE * 64) {
-      setTimeout(sendNextChunk, 10); // wait 10ms and retry
-      return;
-    }
-    // Read EVERYTHING as raw binary arrays for real processing
-    reader.readAsArrayBuffer(file.slice(offset, offset + CHUNK_SIZE));
-  };
 
-  reader.onload = (e) => {
-    const rawBytes = new Uint8Array(e.target.result);
+    // Fetch the next 4MB block into memory
+    const slice = file.slice(offset, offset + DISK_READ_SIZE);
+    const diskBuffer = await slice.arrayBuffer();
+    let diskOffset = 0;
 
-    // ✨ COMPRESSION ROUTER ✨
-    if (!skipCompression) {
-      // 1. Pre-process (RLE) & Compress (Huffman)
-      const rleBytes = RLEncoder.encode(rawBytes);
-      const compressed = HuffmanCoder.encode(rleBytes);
-
-      // Send the packed payload, bit length, and decoding tree
-      dataChannel.send(
-        JSON.stringify({
-          type: "huffman-chunk",
-          payload: compressed.buffer,
-          bitLength: compressed.bitLength,
-          tree: compressed.tree,
-        }),
-      );
-
-      totalCompressedBytesSent += compressed.buffer.length;
-    } else {
-      // 2. Send Raw ArrayBuffer (Bypass)
-      dataChannel.send(e.target.result);
-      totalCompressedBytesSent += rawBytes.byteLength;
-    }
-
-    // Track original bytes processed for progress bar and speed math
-    offset += rawBytes.byteLength;
-    bytesSinceLastReport += rawBytes.byteLength;
-
-    // ── LIVE SPEED & UI MATH ──
-    let now = performance.now();
-    let timeDiff = now - lastReportTime;
-    const isLastChunk = offset >= file.size;
-
-    // Update UI if 250ms has passed OR if it's the very last chunk
-    if (timeDiff > 250 || isLastChunk) {
-      let safeTimeDiff = timeDiff > 0 ? timeDiff : 1; // Prevent division by zero
-      let speedBps = bytesSinceLastReport / (safeTimeDiff / 1000);
-      let speedMbps = (speedBps / (1024 * 1024)).toFixed(1);
-
-      // Display "Fast" if the whole file finished in less than 50ms
-      if (isLastChunk && timeDiff < 50 && speedMbps > 100) {
-        $("speedo-val").textContent = "Fast ⚡";
-      } else {
-        $("speedo-val").textContent = speedMbps + " MB/s";
+    while (diskOffset < diskBuffer.byteLength && activeSendFile) {
+      // Stop-and-wait backpressure handling
+      if (dataChannel.bufferedAmount > BUFFER_MAX) {
+        await new Promise((resolve) => {
+          dataChannel.onbufferedamountlow = () => {
+            dataChannel.onbufferedamountlow = null;
+            resolve();
+          };
+        });
       }
 
-      // Track Peak Speed (filtering out impossible spikes)
+      // Re-verify that abort was not triggered while waiting for network drain
+      if (!activeSendFile) break;
+
+      // OPTIMIZATION 3: Zero-Copy Memory View. Bypasses the need to duplicate arrays by pointing directly to the RAM address.
+      const chunkLen = Math.min(
+        netChunkSize,
+        diskBuffer.byteLength - diskOffset,
+      );
+      const rawBytes = new Uint8Array(diskBuffer, diskOffset, chunkLen);
+
+      if (!skipCompression) {
+        const rleBytes = RLEncoder.encode(rawBytes);
+        const compressed = HuffmanCoder.encode(rleBytes);
+
+        // ZERO-JSON STREAMING: Transmit metadata as text, but maintain pure binary integrity for the heavy payload.
+        dataChannel.send(
+          JSON.stringify({
+            type: "huffman-meta",
+            bitLength: compressed.bitLength,
+            tree: compressed.tree,
+          }),
+        );
+        dataChannel.send(new Uint8Array(compressed.buffer));
+        totalCompressedBytesSent += compressed.buffer.length;
+      } else {
+        dataChannel.send(rawBytes);
+        totalCompressedBytesSent += rawBytes.byteLength;
+      }
+
+      diskOffset += chunkLen;
+      offset += chunkLen;
+      bytesSinceLastReport += chunkLen;
+
+      // Yield execution context to prevent main thread lockups during intensive processing
+      if (!skipCompression && diskOffset % (netChunkSize * 4) === 0) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
+    }
+
+    if (!activeSendFile) return;
+
+    // Telemetry updates
+    const now = performance.now();
+    const timeDiff = now - lastReportTime;
+    const isLastChunk = offset >= file.size;
+
+    if (timeDiff > 250 || isLastChunk) {
+      const safeTimeDiff = timeDiff > 0 ? timeDiff : 1;
+      const speedBps = bytesSinceLastReport / (safeTimeDiff / 1000);
+      const speedMbps = (speedBps / (1024 * 1024)).toFixed(1);
+
+      if (isLastChunk && timeDiff < 50 && speedMbps > 100)
+        $("speedo-val").textContent = "Fast ⚡";
+      else $("speedo-val").textContent = speedMbps + " MB/s";
+
       if (speedMbps > peakSpeed && speedMbps < 10000) {
         peakSpeed = speedMbps;
         $("peak-spd").textContent = peakSpeed;
       }
 
-      // Live "File Snapshot" Updates
       $("s-comp").textContent = fmtBytes(totalCompressedBytesSent);
-      let saved = offset - totalCompressedBytesSent;
+      const saved = offset - totalCompressedBytesSent;
       $("s-saved").textContent = saved > 0 ? fmtBytes(saved) : "0 B";
 
-      // Estimated Time Remaining
-      let remainingBytes = file.size - offset;
-      let secsRemaining = speedBps > 0 ? remainingBytes / speedBps : 0;
+      const remainingBytes = file.size - offset;
+      const secsRemaining = speedBps > 0 ? remainingBytes / speedBps : 0;
       $("s-time").textContent =
         secsRemaining < 3 ? "< 3 sec" : "~" + Math.ceil(secsRemaining) + "s";
 
@@ -488,13 +541,12 @@ function startSendingChunks() {
     );
 
     if (!isLastChunk) {
-      sendNextChunk();
+      sendNextDiskBlock();
     } else {
+      dataChannel.onbufferedamountlow = null;
       console.log(
         `✅ File stream complete. Sent ${totalCompressedBytesSent} real network bytes.`,
       );
-      // ✨ PASS THE MATH TO SCRIPT.JS TO SHOW ON THE UI ✨
-      // Calling this triggers the batch queue to load the next file!
       setTimeout(
         () => onTransferComplete("sender", file.size, totalCompressedBytesSent),
         600,
@@ -502,18 +554,21 @@ function startSendingChunks() {
     }
   };
 
-  sendNextChunk(); // kick off the chain
+  sendNextDiskBlock();
 }
-
-/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   UI HELPERS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
 function updateSendProgress(pct, transferred, total) {
   $("prog-bar").style.width = pct + "%";
   $("prog-pct").textContent = pct + "%";
   $("speedo-sub").textContent =
     fmtBytes(transferred) + " of " + fmtBytes(total);
+}
+
+function updateReceiveProgress(pct, received, total) {
+  $("prog-bar").style.width = pct + "%";
+  $("prog-pct").textContent = pct + "%";
+  $("speedo-sub").textContent = fmtBytes(received) + " of " + fmtBytes(total);
+  $("prog-sub").textContent = pct < 100 ? "Receiving…" : "Done!";
 }
 
 function showReceiveUI(meta) {
@@ -541,16 +596,6 @@ function showReceiveUI(meta) {
   toast(emoji, "Incoming file!", meta.name + " · " + fmtBytes(meta.size));
 }
 
-function updateReceiveProgress(pct, received, total) {
-  $("prog-bar").style.width = pct + "%";
-  $("prog-pct").textContent = pct + "%";
-  $("speedo-sub").textContent = fmtBytes(received) + " of " + fmtBytes(total);
-  $("prog-sub").textContent = pct < 100 ? "Receiving…" : "Done!";
-}
-
-// BUG FIX: Each peer auto-joins their OWN room code on load so they can be found.
-// Peer B then joins Peer A's room via doConnect() → joinRoom().
-// The server fires "ready" when 2 peers share a room.
 document.addEventListener("DOMContentLoaded", () => {
   setTimeout(() => {
     const myCode = $("my-code").textContent;
