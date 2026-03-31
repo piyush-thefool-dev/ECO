@@ -3,7 +3,6 @@
 <img src="https://capsule-render.vercel.app/api?type=rect&color=0:0D1117,100:0D1117&height=160&text=ECO&fontSize=100&fontColor=34abeb&fontAlignY=55&desc=Efficient%20Compressed%20Operations&descAlignY=78&descSize=18&descColor=ffffff&stroke=00FFD1&strokeWidth=2" width="100%"/>
 </div>
 
-
  <img src="src/assets/logo.jpeg" width="350" alt="8INARYBINDERS Logo">
 
 *Private. Serverless. Blazing fast.*
@@ -133,22 +132,24 @@ Open `http://localhost:3000` in **two separate browser tabs or devices** on the 
 ```
 eco/
 ├── src/
+│   ├── assets/
+│   │   └── logo.jpeg             # BINARYBINDERS logo
 │   ├── compression/
-│   │   ├── huffman.js        # Custom Huffman encoder/decoder
-│   │   └── rle.js            # Run-Length Encoding compression
+│   │   ├── huffman.js            # Custom Huffman encoder/decoder
+│   │   └── rle.js                # Run-Length Encoding compression
 │   ├── transport/
-│   │   └── webrtc.js         # WebRTC P2P channel management
+│   │   └── webrtc.js             # WebRTC P2P channel management
 │   ├── ui/
-│   │   └── script.js         # Frontend logic & file handling
+│   │   └── script.js             # Frontend logic & file handling
 │   └── server/
-│       └── server.js         # Signaling server (handshake only)
+│       └── server.js             # Signaling server (handshake only)
 ├── public/
-│   ├── index.html            # Main UI entry point
-│   └── style.css             # Stylesheet
-├── assets/
-│   └── logo.png              # BINARYBINDERS logo
+│   └── style.css                 # Stylesheet
+├── index.html                    # Root entry point
 ├── package.json
-├── SIGNALING.md              # Signaling server documentation
+├── package-lock.json
+├── SIGNALING.md                  # Signaling server documentation
+├── test.txt
 └── README.md
 ```
 
@@ -178,13 +179,11 @@ A lightweight pre-pass that collapses consecutive repeated bytes into a count + 
 
 ## Roadmap: What's Coming Up Next- 💻
 
-- [ ] Drag-and-drop peer discovery on LAN — connect two devices on the same WiFi without any session code at all
 - [ ] LAN peer discovery (mDNS)
 - [ ] Transfer resume on disconnect — if WebRTC drops mid-transfer, reconnect and continue from where it stopped
-- [ ] Mobile PWA support
 - [ ] Clipboard transfer — paste text or images directly without selecting a file
 - [ ] Optional password- add an optional PIN so only the intended receiver can connect
-
+- [ ] P2P Chatting Option - Reciever & Sender can communicate within in built chatting system; No need to rely on any other means of Telecommunication
 ---
 
 ## Contributing
